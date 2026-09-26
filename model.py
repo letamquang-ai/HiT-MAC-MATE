@@ -2,7 +2,7 @@ from __future__ import division
 import torch
 import numpy as np
 import torch.nn as nn
-from gym import spaces
+from gymnasium import spaces
 import torch.nn.functional as F
 from torch.autograd import Variable
 
