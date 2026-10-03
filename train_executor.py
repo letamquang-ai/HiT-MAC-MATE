@@ -78,6 +78,7 @@ def _evaluate_snapshot(model, args, num_episodes, seed_offset=0):
         for episode in range(num_episodes):
             obs, _ = env.reset(seed=args.seed + 900000000 + seed_offset + episode)
             goals = generate_pseudo_goals(obs, num_targets)
+            low, high = action_bounds(obs, args.rotation_only, "cpu")
             reward_sum = rotation_sum = 0.0
             steps = 0
             t0 = time.time()
@@ -85,18 +86,17 @@ def _evaluate_snapshot(model, args, num_episodes, seed_offset=0):
                 if step > 0 and step % args.goal_period == 0:
                     goals = generate_pseudo_goals(obs, num_targets)
                 x, mask = flatten_camera_features(obs, goals, num_targets, "cpu")
-                low, high = action_bounds(obs, args.rotation_only, "cpu")
-                with torch.no_grad():
+                with torch.inference_mode():
                     action, _, _, _ = model.act(x, mask, low, high, deterministic=True)
-                action_np = action.cpu().numpy()
+                action_np = action.numpy()
                 if args.rotation_only:
                     action_np[:, 1] = 0.0
                 next_obs, _, terminated, truncated, _ = env.step(action_np)
-                reward = np.mean([
+                reward = float(np.mean([
                     goal_conditioned_reward(o, no, goal, act, args.reward_beta)
                     for o, no, goal, act in zip(obs, next_obs, goals, action_np)
-                ])
-                reward_sum += float(reward)
+                ]))
+                reward_sum += reward
                 rotation_sum += float(np.mean(np.abs(action_np[:, 0])))
                 steps += 1
                 obs = next_obs
@@ -109,35 +109,42 @@ def _evaluate_snapshot(model, args, num_episodes, seed_offset=0):
             episode_fps.append(steps / elapsed)
     finally:
         env.close()
-    reward_array = np.asarray(episode_rewards, dtype=np.float64)
-    length_array = np.asarray(episode_lengths, dtype=np.float64)
-    rotation_array = np.asarray(episode_rotations, dtype=np.float64)
-    fps_array = np.asarray(episode_fps, dtype=np.float64)
-    ag_per_episode = np.divide(reward_array, rotation_array, out=np.zeros_like(reward_array), where=rotation_array > 1e-8)
+    rewards = np.asarray(episode_rewards, dtype=np.float64)
+    lengths = np.asarray(episode_lengths, dtype=np.float64)
+    rotations = np.asarray(episode_rotations, dtype=np.float64)
+    fps = np.asarray(episode_fps, dtype=np.float64)
+    ag = np.divide(rewards, rotations, out=np.zeros_like(rewards), where=rotations > 1e-8)
     return {
         "elapsed": time.time() - start_time,
-        "ave_eps_reward": float(reward_array.mean()),
-        "ave_eps_length": float(length_array.mean()),
-        "reward_step": float(reward_array.sum() / max(length_array.sum(), 1.0)),
-        "fps": float(fps_array.mean()),
-        "mean_reward": float(reward_array.mean()),
-        "std_reward": float(reward_array.std()),
-        "AG": float(ag_per_episode.mean()),
+        "ave_eps_reward": float(rewards.mean()),
+        "ave_eps_length": float(lengths.mean()),
+        "reward_step": float(rewards.sum() / max(lengths.sum(), 1.0)),
+        "fps": float(fps.mean()),
+        "mean_reward": float(rewards.mean()),
+        "std_reward": float(rewards.std()),
+        "AG": float(ag.mean()),
     }
 
-
 def test(args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock):
-    """Run the HiT-MAC-style evaluation process against the shared executor."""
+    """Run periodic HiT-MAC-style evaluation against the shared executor."""
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     eval_model = ExecutorNet(5, args.hidden_dim, action_dim=2)
     best_score = float("-inf")
     start_time = time.time()
+    next_eval = min(args.test_frequency, args.episodes)
     try:
         while True:
+            while completed_episodes.value < next_eval:
+                if completed_episodes.value >= args.episodes:
+                    break
+                time.sleep(max(args.sleep_time, 0.05))
+            if completed_episodes.value == 0:
+                continue
+            eval_episode = min(completed_episodes.value, args.episodes)
             with optimizer_lock:
                 eval_model.load_state_dict(shared_model.state_dict())
-            metrics = _evaluate_snapshot(eval_model, args, args.eval_episodes, completed_episodes.value)
+            metrics = _evaluate_snapshot(eval_model, args, args.eval_episodes, eval_episode)
             score = metrics["ave_eps_reward"]
             if score >= best_score:
                 best_score = score
@@ -146,11 +153,12 @@ def test(args, shared_model, optimizer, train_modes, n_iters, completed_episodes
                     "model": eval_model.state_dict(),
                     "config": vars(args),
                     "eval_metrics": metrics,
-                    "evaluation_episode": completed_episodes.value,
+                    "evaluation_episode": eval_episode,
                 }, args.best_save)
                 print("save best!", flush=True)
             print(
-                "Time {0}, ave eps reward {1}, ave eps length {2}, reward step {3}, FPS {4}, mean reward {5}, std reward {6}, AG {7}".format(
+                "Episode {0}, Time {1}, ave eps reward {2}, ave eps length {3}, reward step {4}, FPS {5}, mean reward {6}, std reward {7}, AG {8}".format(
+                    eval_episode,
                     time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - start_time)),
                     np.around(metrics["ave_eps_reward"], 2),
                     np.around(metrics["ave_eps_length"], 2),
@@ -162,13 +170,12 @@ def test(args, shared_model, optimizer, train_modes, n_iters, completed_episodes
                 ),
                 flush=True,
             )
-            if completed_episodes.value >= args.episodes:
+            if eval_episode >= args.episodes:
                 break
-            time.sleep(args.sleep_time)
+            next_eval = min(next_eval + args.test_frequency, args.episodes)
     finally:
         for rank in range(args.workers):
             train_modes[rank] = -100
-
 
 def optimize(
     rollout,
@@ -237,7 +244,7 @@ def optimize(
 
     rollout.clear()
 
-def train(rank, args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock, episode_lock):
+def train(rank, args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock, episode_lock, episode_counter):
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     torch.set_num_threads(1)
@@ -263,12 +270,13 @@ def train(rank, args, shared_model, optimizer, train_modes, n_iters, completed_e
     try:
         while True:
             with episode_lock:
-                if completed_episodes.value >= args.episodes:
+                if episode_counter.value >= args.episodes:
                     break
-                episode = completed_episodes.value + 1
-                completed_episodes.value = episode
+                episode_counter.value += 1
+                episode = episode_counter.value
             obs, _ = env.reset(seed=args.seed + rank * 100000 + episode)
             goals = generate_pseudo_goals(obs, num_targets)
+            low, high = action_bounds(obs, cfg.rotation_only, device)
             rollout = []
             with optimizer_lock:
                 local_model.load_state_dict(shared_model.state_dict())
@@ -276,7 +284,6 @@ def train(rank, args, shared_model, optimizer, train_modes, n_iters, completed_e
                 if step > 0 and step % cfg.goal_period == 0:
                     goals = generate_pseudo_goals(obs, num_targets)
                 x, mask = flatten_camera_features(obs, goals, num_targets, device)
-                low, high = action_bounds(obs, cfg.rotation_only, device)
                 action, logp, entropy, value = local_model.act(x, mask, low, high)
                 action_np = action.detach().cpu().numpy()
                 if cfg.rotation_only:
@@ -304,6 +311,8 @@ def train(rank, args, shared_model, optimizer, train_modes, n_iters, completed_e
                             local_model.load_state_dict(shared_model.state_dict())
                 if done:
                     break
+            with episode_lock:
+                completed_episodes.value += 1
             train_modes[rank] = 0
     finally:
         train_modes[rank] = -100
@@ -327,6 +336,7 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--eval-episodes", "--test-eps", dest="eval_episodes", type=int, default=10)
     parser.add_argument("--sleep-time", type=float, default=0.0)
+    parser.add_argument("--test-frequency", type=int, default=100)
     parser.add_argument("--load-executor-dir", default=None)
     parser.add_argument("--best-save", default="trainedModel/executor_best.pth")
     parser.add_argument("--rotation-only", action=argparse.BooleanOptionalAction, default=True)
@@ -374,7 +384,7 @@ def main():
     for rank in range(args.workers):
         p = mp.Process(
             target=train,
-            args=(rank, args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock, episode_lock),
+            args=(rank, args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock, episode_lock, episode_counter),
         )
         p.start()
         processes.append(p)
