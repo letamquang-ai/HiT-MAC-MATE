@@ -25,7 +25,6 @@ from mate.algos.executor import (
 )
 from mate.algos.shared import SharedAdam
 
-
 def make_env(config_path: str | None):
     base = (
         gym.make("MultiAgentTracking-v0", config=config_path)
@@ -33,7 +32,6 @@ def make_env(config_path: str | None):
         else gym.make("MultiAgentTracking-v0")
     )
     return mate.MultiCamera.make(base, target_agent=mate.GreedyTargetAgent())
-
 
 def flatten_camera_features(obs, goals, num_targets, device):
     features, masks = [], []
@@ -45,7 +43,6 @@ def flatten_camera_features(obs, goals, num_targets, device):
         torch.from_numpy(np.asarray(features)).float().to(device),
         torch.from_numpy(np.asarray(masks)).bool().to(device),
     )
-
 
 def action_bounds(obs, rotation_only, device):
     from mate import constants as consts
@@ -71,9 +68,7 @@ def action_bounds(obs, rotation_only, device):
         torch.tensor(highs, dtype=torch.float32, device=device),
     )
 
-
-
-def evaluate_policy(model, args, num_episodes, seed_offset=0):
+def test(model, args, num_episodes, seed_offset=0):
     """Evaluate a snapshot and report HiT-MAC-style test statistics."""
     env = make_env(args.config)
     num_targets = env.unwrapped.num_targets
@@ -166,7 +161,7 @@ def evaluate_policy(model, args, num_episodes, seed_offset=0):
         "AG": float(ag_per_episode.mean()),
     }
 
-def optimize_rollout(
+def train(
     rollout,
     bootstrap,
     local_model,
@@ -232,7 +227,6 @@ def optimize_rollout(
         optimizer.step()
 
     rollout.clear()
-
 
 def worker(
     rank,
@@ -324,7 +318,7 @@ def worker(
                         )
                         _, _, bootstrap = local_model(bx, bm)
 
-                optimize_rollout(
+                train(
                     rollout,
                     bootstrap,
                     local_model,
@@ -347,7 +341,7 @@ def worker(
             eval_model = ExecutorNet(5, args.hidden_dim, action_dim=2)
             with optimizer_lock:
                 eval_model.load_state_dict(shared_model.state_dict())
-            metrics = evaluate_policy(
+            metrics = test(
                 eval_model, args, args.eval_episodes, episode
             )
             eval_mean = metrics["ave_eps_reward"]
@@ -392,7 +386,6 @@ def worker(
                 )
 
     env.close()
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -453,7 +446,6 @@ def main():
         args.save,
     )
     print(f"saved executor -> {args.save}")
-
 
 if __name__ == "__main__":
     main()
