@@ -2,6 +2,7 @@
 
 from mate.agents import greedy, heuristic, mixture, naive, random, utils
 from mate.agents.base import CameraAgentBase, TargetAgentBase
+from mate.agents.cmcpga import CMCPGACameraAgent, CMCPGATargetAgent
 from mate.agents.greedy import GreedyCameraAgent, GreedyTargetAgent
 from mate.agents.heuristic import HeuristicCameraAgent, HeuristicTargetAgent
 from mate.agents.mixture import MixtureCameraAgent, MixtureTargetAgent
@@ -23,6 +24,8 @@ __all__ = [
     'HeuristicTargetAgent',
     'MixtureCameraAgent',
     'MixtureTargetAgent',
+    'CMCPGACameraAgent',
+    'CMCPGATargetAgent',
 ]
 
 __all__.extend(utils.__all__)
