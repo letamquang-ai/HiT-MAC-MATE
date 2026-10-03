@@ -369,6 +369,7 @@ def main():
     train_modes = manager.list([0 for _ in range(args.workers)])
     n_iters = manager.list([0 for _ in range(args.workers)])
     completed_episodes = mp.Value("i", 0)
+    episode_counter = mp.Value("i", 0)
     episode_lock = mp.Lock()
     optimizer_lock = mp.Lock()
     processes = []
