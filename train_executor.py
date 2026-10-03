@@ -135,7 +135,7 @@ def test(args, shared_model, optimizer, train_modes, n_iters, completed_episodes
     next_eval = min(args.test_frequency, args.episodes)
     try:
         while True:
-            while completed_episodes.value < next_eval:
+            while episode_counter.value < next_eval:
                 if completed_episodes.value >= args.episodes:
                     break
                 time.sleep(max(args.sleep_time, 0.05))
@@ -244,7 +244,7 @@ def optimize(
 
     rollout.clear()
 
-def train(rank, args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock, episode_lock, episode_counter):
+def train(rank, args, shared_model, optimizer, train_modes, n_iters, episode_counter, optimizer_lock, episode_lock):
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     torch.set_num_threads(1)
@@ -311,8 +311,6 @@ def train(rank, args, shared_model, optimizer, train_modes, n_iters, completed_e
                             local_model.load_state_dict(shared_model.state_dict())
                 if done:
                     break
-            with episode_lock:
-                completed_episodes.value += 1
             train_modes[rank] = 0
     finally:
         train_modes[rank] = -100
@@ -368,7 +366,6 @@ def main():
     manager = mp.Manager()
     train_modes = manager.list([0 for _ in range(args.workers)])
     n_iters = manager.list([0 for _ in range(args.workers)])
-    completed_episodes = mp.Value("i", 0)
     episode_counter = mp.Value("i", 0)
     episode_lock = mp.Lock()
     optimizer_lock = mp.Lock()
@@ -376,7 +373,7 @@ def main():
 
     p = mp.Process(
         target=test,
-        args=(args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock),
+        args=(args, shared_model, optimizer, train_modes, n_iters, episode_counter, optimizer_lock),
     )
     p.start()
     processes.append(p)
@@ -385,7 +382,7 @@ def main():
     for rank in range(args.workers):
         p = mp.Process(
             target=train,
-            args=(rank, args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock, episode_lock, episode_counter),
+            args=(rank, args, shared_model, optimizer, train_modes, n_iters, episode_counter, optimizer_lock, episode_lock),
         )
         p.start()
         processes.append(p)
