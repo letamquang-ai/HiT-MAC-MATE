@@ -125,7 +125,7 @@ def _evaluate_snapshot(model, args, num_episodes, seed_offset=0):
         "AG": float(ag.mean()),
     }
 
-def test(args, shared_model, optimizer, train_modes, n_iters, completed_episodes, optimizer_lock):
+def test(args, shared_model, optimizer, train_modes, n_iters, episode_counter, optimizer_lock):
     """Run periodic HiT-MAC-style evaluation against the shared executor."""
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -136,12 +136,12 @@ def test(args, shared_model, optimizer, train_modes, n_iters, completed_episodes
     try:
         while True:
             while episode_counter.value < next_eval:
-                if completed_episodes.value >= args.episodes:
+                if episode_counter.value >= args.episodes:
                     break
                 time.sleep(max(args.sleep_time, 0.05))
-            if completed_episodes.value == 0:
+            if episode_counter.value == 0:
                 continue
-            eval_episode = min(completed_episodes.value, args.episodes)
+            eval_episode = min(episode_counter.value, args.episodes)
             with optimizer_lock:
                 eval_model.load_state_dict(shared_model.state_dict())
             metrics = _evaluate_snapshot(eval_model, args, args.eval_episodes, eval_episode)
