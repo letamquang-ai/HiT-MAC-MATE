@@ -152,157 +152,74 @@ class ExecutorNet(nn.Module):
         return action, log_prob, entropy, value
 
 
-def build_target_features(
-    observation: np.ndarray,
-    goal: np.ndarray,
-    num_targets: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Build the goal-conditioned target set from a MATE camera observation.
-
-    Feature order:
-        target_id, distance/max_range, relative_angle/180,
-        target_sight_range/max_range, loaded_bit.
-
-    The goal is a binary vector over target IDs. Targets outside the
-    camera's sensing range or without a valid observation mask are removed.
-    """
+def build_target_features(observation: np.ndarray, goal: np.ndarray, num_targets: int) -> Tuple[np.ndarray, np.ndarray]:
     obs = np.asarray(observation, dtype=np.float64)
-    # MATE observation layout is provided by CameraAgentBase/constants.
     from mate import constants as consts
-    from mate.utils import Team
-
-    slices = consts.camera_observation_slices_of(
-        int(round(obs[0])), int(round(obs[1])), int(round(obs[2]))
-    )
+    slices = consts.camera_observation_slices_of(int(round(obs[0])), int(round(obs[1])), int(round(obs[2])))
     self_state = obs[slices["self_state"]]
-    target_block = obs[slices["opponent_states_with_mask"]].reshape(
-        num_targets, consts.TARGET_STATE_DIM_PUBLIC + 1
-    )
-
+    target_block = obs[slices["opponent_states_with_mask"]].reshape(num_targets, consts.TARGET_STATE_DIM_PUBLIC + 1)
     camera_xy = self_state[:2]
     max_range = max(float(self_state[6]), 1e-6)
     features = np.zeros((num_targets, 5), dtype=np.float32)
-    mask = np.zeros(num_targets, dtype=np.bool_)
-
-    for j in range(num_targets):
-        target = target_block[j, : consts.TARGET_STATE_DIM_PUBLIC]
-        sensed = bool(target_block[j, consts.TARGET_STATE_DIM_PUBLIC] > 0.5)
-        if not sensed or not bool(goal[j]):
-            continue
-
-        delta = target[:2] - camera_xy
-        distance = float(np.linalg.norm(delta))
-        if distance >= max_range:
-            continue
-
-        # Camera orientation is encoded as cos/sin in state[3:5].
-        orientation = float(np.degrees(np.arctan2(self_state[4], self_state[3])))
-        target_angle = float(np.degrees(np.arctan2(delta[1], delta[0])))
-        relative_angle = ((target_angle - orientation + 180.0) % 360.0) - 180.0
-
-        features[j] = [
-            j / max(num_targets - 1, 1),
-            distance / max_range,
-            relative_angle / 180.0,
-            float(target[2]) / max_range,
-            float(target[3]),
-        ]
-        mask[j] = True
-
-    return features, mask
+    sensed = target_block[:, consts.TARGET_STATE_DIM_PUBLIC] > 0.5
+    deltas = target_block[:, :2] - camera_xy
+    distances = np.linalg.norm(deltas, axis=1)
+    selected = sensed & (np.asarray(goal) > 0.5) & (distances < max_range)
+    if not selected.any():
+        return features, selected.astype(np.bool_)
+    orientation = float(np.degrees(np.arctan2(self_state[4], self_state[3])))
+    target_angles = np.degrees(np.arctan2(deltas[:, 1], deltas[:, 0]))
+    relative_angles = ((target_angles - orientation + 180.0) % 360.0) - 180.0
+    idx = np.flatnonzero(selected)
+    features[idx, 0] = idx / max(num_targets - 1, 1)
+    features[idx, 1] = distances[idx] / max_range
+    features[idx, 2] = relative_angles[idx] / 180.0
+    features[idx, 3] = target_block[idx, 2] / max_range
+    features[idx, 4] = target_block[idx, 3]
+    return features, selected.astype(np.bool_)
 
 
-def generate_pseudo_goals(
-    observations: np.ndarray,
-    num_targets: int,
-) -> np.ndarray:
-    """HiT-MAC Appendix A pseudo-goal generation.
-
-    Every K steps the original method selects targets whose distance to the
-    sensor is below the maximum coverage distance.
-    """
+def generate_pseudo_goals(observations: np.ndarray, num_targets: int) -> np.ndarray:
     observations = np.asarray(observations)
     from mate import constants as consts
-
     goals = np.zeros((len(observations), num_targets), dtype=np.float32)
-
     for i, obs in enumerate(observations):
-        slices = consts.camera_observation_slices_of(
-            int(round(obs[0])), int(round(obs[1])), int(round(obs[2]))
-        )
+        slices = consts.camera_observation_slices_of(int(round(obs[0])), int(round(obs[1])), int(round(obs[2])))
         self_state = obs[slices["self_state"]]
-        target_block = obs[slices["opponent_states_with_mask"]].reshape(
-            num_targets, consts.TARGET_STATE_DIM_PUBLIC + 1
-        )
+        target_block = obs[slices["opponent_states_with_mask"]].reshape(num_targets, consts.TARGET_STATE_DIM_PUBLIC + 1)
         camera_xy = self_state[:2]
         max_range = float(self_state[6])
-
-        for j in range(num_targets):
-            target = target_block[j, : consts.TARGET_STATE_DIM_PUBLIC]
-            sensed = target_block[j, consts.TARGET_STATE_DIM_PUBLIC] > 0.5
-            distance = np.linalg.norm(target[:2] - camera_xy)
-            if sensed and distance < max_range:
-                goals[i, j] = 1.0
-
-        # MATE can occasionally provide an empty sensed set. Keep one target
-        # to avoid a completely unconditioned rollout.
-        if not goals[i].any():
-            valid = target_block[:, consts.TARGET_STATE_DIM_PUBLIC] > 0.5
-            if valid.any():
-                distances = np.linalg.norm(target_block[:, :2] - camera_xy, axis=1)
-                distances[~valid] = np.inf
-                goals[i, int(np.argmin(distances))] = 1.0
-
+        sensed = target_block[:, consts.TARGET_STATE_DIM_PUBLIC] > 0.5
+        distances = np.linalg.norm(target_block[:, :2] - camera_xy, axis=1)
+        valid = sensed & (distances < max_range)
+        goals[i, valid] = 1.0
+        if not valid.any() and sensed.any():
+            goals[i, int(np.argmin(np.where(sensed, distances, np.inf)))] = 1.0
     return goals
 
 
-def goal_conditioned_reward(
-    observation: np.ndarray,
-    next_observation: np.ndarray,
-    goal: np.ndarray,
-    action: np.ndarray,
-    beta: float = 0.01,
-) -> float:
-    """HiT-MAC Eq. (4), adapted to MATE's continuous camera action."""
+def goal_conditioned_reward(observation: np.ndarray, next_observation: np.ndarray, goal: np.ndarray, action: np.ndarray, beta: float = 0.01) -> float:
     from mate import constants as consts
-
     obs = np.asarray(next_observation, dtype=np.float64)
-    slices = consts.camera_observation_slices_of(
-        int(round(obs[0])), int(round(obs[1])), int(round(obs[2]))
-    )
+    slices = consts.camera_observation_slices_of(int(round(obs[0])), int(round(obs[1])), int(round(obs[2])))
     self_state = obs[slices["self_state"]]
-    target_block = obs[slices["opponent_states_with_mask"]].reshape(
-        int(round(obs[1])), consts.TARGET_STATE_DIM_PUBLIC + 1
-    )
-
-    camera_xy = self_state[:2]
-    max_range = max(float(self_state[6]), 1e-6)
-    orientation = float(np.degrees(np.arctan2(self_state[4], self_state[3])))
-    viewing_angle = float(self_state[5])
-
-    rewards = []
-    for j in np.flatnonzero(goal > 0.5):
-        target = target_block[j, : consts.TARGET_STATE_DIM_PUBLIC]
-        if target_block[j, consts.TARGET_STATE_DIM_PUBLIC] <= 0.5:
-            rewards.append(-1.0)
-            continue
-
-        delta = target[:2] - camera_xy
-        distance = float(np.linalg.norm(delta))
-        target_angle = float(np.degrees(np.arctan2(delta[1], delta[0])))
-        relative_angle = abs(((target_angle - orientation + 180.0) % 360.0) - 180.0)
-
-        # Original HiT-MAC uses alpha_max as the maximum viewing angle.
-        alpha_max = max(viewing_angle, 1e-6)
-        if distance < max_range and relative_angle < alpha_max:
-            rewards.append(1.0 - relative_angle / alpha_max)
-        else:
-            rewards.append(-1.0)
-
-    tracking_reward = float(np.mean(rewards)) if rewards else 0.0
-
-    # MATE rotation is measured directly in degrees. Normalize by the current
-    # camera rotation step, matching the original normalized rotation cost.
+    num_targets = int(round(obs[1]))
+    target_block = obs[slices["opponent_states_with_mask"]].reshape(num_targets, consts.TARGET_STATE_DIM_PUBLIC + 1)
+    indices = np.flatnonzero(np.asarray(goal) > 0.5)
+    if indices.size == 0:
+        tracking_reward = 0.0
+    else:
+        targets = target_block[indices]
+        sensed = targets[:, consts.TARGET_STATE_DIM_PUBLIC] > 0.5
+        delta = targets[:, :2] - self_state[:2]
+        distance = np.linalg.norm(delta, axis=1)
+        orientation = float(np.degrees(np.arctan2(self_state[4], self_state[3])))
+        target_angle = np.degrees(np.arctan2(delta[:, 1], delta[:, 0]))
+        relative_angle = np.abs(((target_angle - orientation + 180.0) % 360.0) - 180.0)
+        alpha_max = max(float(self_state[5]), 1e-6)
+        covered = sensed & (distance < max(float(self_state[6]), 1e-6)) & (relative_angle < alpha_max)
+        tracking_reward = float(np.where(covered, 1.0 - relative_angle / alpha_max, -1.0).mean())
     rotation_step = max(float(abs(self_state[7])), 1e-6)
     rotation_cost = abs(float(np.asarray(action)[0])) / rotation_step
     return tracking_reward - beta * rotation_cost
+
