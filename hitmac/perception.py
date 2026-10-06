@@ -38,6 +38,12 @@ class NoisyLinear(nn.Linear):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        # nn.Linear calls this method during its own initialization, before
+        # the NoisyLinear-specific parameters have been registered.
+        if not hasattr(self, "sigma_weight"):
+            super().reset_parameters()
+            return
+
         # Match the initialization used by the original HiT-MAC implementation.
         bound = math.sqrt(3.0 / self.in_features) if self.in_features else 0.0
         nn.init.uniform_(self.weight, -bound, bound)
