@@ -1,0 +1,41 @@
+[project]
+name = "mate"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.13.0"
+dependencies = [
+    "swig>=4.3.1.post0",
+    "gymnasium[box2d]>=1.2.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.6",
+    "opencv-python>=4.12.0.88",
+    "pandas>=2.3.2",
+    "pygame>=2.6.1",
+    "pyglet>1.5.27",
+    "pyyaml>=6.0.2",
+    "scikit-image>=0.25.2",
+    "stable-baselines3>=2.7.0",
+    "swig>=4.3.1.post0",
+    "tensorboard>=2.20.0",
+    "torchinfo>=1.8.0",
+    "tqdm>=4.67.1",
+    "torch-summary>=1.4.5",
+    "torch>=2.10.0",
+    "dacite>=1.9.2",
+    "dill>=0.4.1",
+    "wandb>=0.25.1",
+    "pyrefly>=1.1.1",
+    "transformers>=5.13.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
